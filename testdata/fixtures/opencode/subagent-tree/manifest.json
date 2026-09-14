@@ -3,9 +3,9 @@
   "source_agent": "opencode",
   "source_version": "1.18.30",
   "session_root": "ses_f7277fec8ffeousSUu48TJvWbl",
-  "includes_subagent_children": yes,
-  "rows": {"sessions": 27, "messages": 618, "parts": 2497},
-  "anonymization": ["username in paths -> /Users/user", "project names -> placeholders", "session ids preserved for referential integrity"],
-  "content_policy": "structure + usage only; full text content remains in fixture for offline parser testing",
+  "includes_subagent_children": true,
+  "rows": {"sessions": 27, "child_sessions": 26, "messages": 1205, "parts": 4921},
+  "notes": "event table trimmed to 10 sample rows (projection, not source of truth); session ids preserved for referential integrity; dangling parent_id in tool-heavy fixture is by design (its parent session lives in subagent-tree fixture)",
+  "anonymization": ["usernames in paths -> /Users/user", "github owner name -> GH-OWNER", "project names -> placeholders", "known emails -> EMAIL-REDACTED", "oversized summary.diffs and tool outputs > 50KB truncated"],
   "provenance": "captured via sqlite3 .backup from live install 2026-09-14"
 }

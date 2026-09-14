@@ -33,9 +33,10 @@ Relevant tables (`.tables`):
 | `project` / `workspace` / `project_directory` | Project registry (worktree, VCS, name) | Sessions FK to `project_id` |
 | `todo` | Per-session todo lists (content, status, priority, position) | Observable task markers! |
 | `session_context_epoch` | Compaction baseline bookkeeping | `baseline`, `snapshot`, `baseline_seq` |
-| `migration` / `event_sequence` / `data_migration` | Infrastructure | Ignore |
+| `migration` | Infrastructure | Ignore |
+| `event_sequence` | One row per aggregate (session) — the FK parent of `event` rows (`aggregate_id`, monotonic `seq`) | Bookkeeping for the event projection |
 
-**Evidence:** `sqlite3 ~/.local/share/opencode/opencode.db ".tables"` / `.schema <table>` — 44 sessions, 1,511 messages, 5,971 parts, 21,478 events, 3 projects in the investigated install.
+**Evidence:** `sqlite3 ~/.local/share/opencode/opencode.db ".tables"` / `.schema <table>` — 44 sessions, 1,511 messages, 5,971 parts, 21,478 events, 3 projects in the investigated install at dossier time (live install keeps growing; fixture row counts are the pinned reference).
 
 **Provenance note:** timestamps are epoch **milliseconds** throughout.
 
@@ -49,11 +50,14 @@ Relevant tables (`.tables`):
 |---|---|---|---|
 | `id` | text | `ses_<random>` | observed |
 | `project_id` | text | FK to project | observed |
+| `workspace_id` | text | FK to workspace (often null) | observed |
 | `parent_id` | text | **set for subagent sessions** — points to the parent session row | observed |
 | `slug` | text | human-ish name (`sunny-garden`) | observed |
 | `directory` | text | working dir at session start | observed |
+| `path` | text | | unknown (empty in observed data) |
 | `title` | text | LLM-generated title (e.g. "Fix golangci-lint CI pin (@implementer subagent)") | observed (generated, but stored) |
 | `version` | text | OpenCode version that created it (`1.18.30`) | observed |
+| `share_url` | text | public share link when session was shared | observed when set |
 | `cost` | real | session cost rollup — **observed 0.0 everywhere** (provider not reporting cost) | observed-as-zero → we treat provider cost as **unavailable**, not zero |
 | `tokens_input/output/reasoning/cache_read/cache_write` | int | session rollups | observed (rollup, derived by OpenCode — label accordingly) |
 | `summary_additions/deletions/files` | int | diff summary | observed |
@@ -122,11 +126,11 @@ Field-by-field:
 | `tokens.cache.read/write` | Cache hits/writes | observed |
 | `modelID` / `providerID` | Per-call model identity (flat fields, not nested) | observed |
 | `time.created` / `time.completed` | Per-call latency = completed − created | observed |
-| `finish` | `tool-calls`, (others: `stop`, `length`… — only `tool-calls` observed) | observed |
+| `finish` | Termination reason for the call: observed values `tool-calls`, `stop`, `length`, `unknown` (per-step `reason` in `step-finish` uses the same vocabulary) | observed |
 
 **Quirk:** user messages carry the model config *requested at prompt time* (nested `model` object); assistant messages carry *what actually ran* (flat `modelID`/`providerID`). **Always use the assistant record for attribution.**
 
-**Coverage check (this install):** 1,395 of 1,404 assistant messages have `time.completed` → 99.4% timing completeness. 0 of N have nonzero cost.
+**Coverage check (this install):** 99.3% of assistant messages have `time.completed` (1,494/1,504 install-wide at dossier time; multi-turn-build fixture: 313/316 = 99.05% — the remainder are transient/incomplete calls). 0 have nonzero cost.
 
 ---
 
@@ -237,25 +241,29 @@ Observed (modelID, providerID) pairs: `glm-5.3:cloud`/`ollama`, `glm-5.3-flash:c
 7. `session_context_epoch.baseline/snapshot/baseline_seq` — compaction internals; exact semantics unknown (recorded, not needed for v0.1).
 8. `auth.json` contains credentials — AgentLens must **never read it** (adapter hard rule).
 9. WAL mode: reading the DB while OpenCode runs is safe for reads, but fixtures must be taken via `sqlite3 .backup` to get a consistent snapshot.
-10. `finish` values other than `tool-calls` not observed in this install (expect `stop`, `length`); parser must default-accept unknown finishes.
+10. `finish` values observed across fixtures: `tool-calls`, `stop`, `length`, `unknown`; parser must default-accept unknown values (the vocabulary may grow across OpenCode versions).
 
 ---
 
 ## 10. Golden fixtures
 
-`testdata/fixtures/opencode/` — each fixture is a **consistent SQLite snapshot** (`.backup` dump) + a manifest:
+`testdata/fixtures/opencode/` — each fixture is a **consistent SQLite snapshot** (`.backup` + `VACUUM INTO`), with `manifest.json` (valid JSON; row counts verified against the DB):
 
 | Fixture | Source session | Shows |
 |---|---|---|
 | `single-turn/` | Short 1-turn session | Minimal user→assistant pair, one tool call |
 | `multi-turn-build/` | Medium build session | Many turns, step-start/finish loop, patches |
-| `subagent-tree/` | MatchZone orchestration session | Parent + child sessions, per-subagent models/agents |
-| `tool-heavy/` | Session dense in tool calls | Edit/bash/read/write states incl. an error state |
+| `subagent-tree/` | MatchZone orchestration session | Root + 26 child sessions with messages/parts per child, per-subagent models/agents |
+| `tool-heavy/` | Session dense in tool calls | Edit/bash/read/write states incl. error states |
 | `cache-heavy/` | Session with high cache_read | Token cache attribution |
 
-**Anonymization applied:** usernames in paths (`/Users/ahmedennaime` → `/Users/user`), session ids re-randomized per fixture, project names mapped to placeholders, all message/part text content truncated to 0 (v0.1 fixtures carry structure + usage only, not content — content re-read policy D28; content-bearing fixtures arrive with issue #13 redaction tests), secrets scrubbed by inspection.
+**Anonymization applied (see `scripts/make-opencode-fixtures.sh`):** usernames in paths → `/Users/user`; GitHub owner name → `GH-OWNER`; project names → placeholders; email-shaped strings → `EMAIL-REDACTED` (file references like `@AGENTS.md` are preserved); oversized `summary.diffs` and tool outputs >50KB truncated to `[TRUNCATED-FIXTURE-ONLY]`; session ids preserved for referential integrity.
 
-**Manifest format** (`manifest.json` per fixture): source (session id pattern + OpenCode version), rows (sessions/messages/parts), anonymization steps applied, known quirks present, checksum.
+**Verification (built into the generator, fails the build on any hit):** zero username occurrences across all text columns (incl. `event.data`, `project_directory.directory`), zero email-pattern occurrences, zero foreign-key violations, zero orphan rows, manifest row counts match DB.
+
+**Content policy:** fixtures carry full structure + usage + content text (needed for offline parser testing) — they are **anonymized, not empty**. Content-reference policy (D28) governs AgentLens's own storage, not the fixtures.
+
+**Notes:** the `event` table is trimmed to 10 sample rows per fixture (projection, not source of truth; the 10 rows may span multiple aggregates — do not assume single-aggregate event sets); the tool-heavy fixture's session has a `parent_id` pointing to the subagent-tree root which is not present in that fixture — **dangling by design**, recorded here and in the manifest.
 
 ---
 
