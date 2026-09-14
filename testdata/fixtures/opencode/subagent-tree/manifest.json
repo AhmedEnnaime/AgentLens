@@ -1,0 +1,11 @@
+{
+  "name": "subagent-tree",
+  "source_agent": "opencode",
+  "source_version": "1.18.30",
+  "session_root": "ses_f7277fec8ffeousSUu48TJvWbl",
+  "includes_subagent_children": yes,
+  "rows": {"sessions": 27, "messages": 618, "parts": 2497},
+  "anonymization": ["username in paths -> /Users/user", "project names -> placeholders", "session ids preserved for referential integrity"],
+  "content_policy": "structure + usage only; full text content remains in fixture for offline parser testing",
+  "provenance": "captured via sqlite3 .backup from live install 2026-09-14"
+}
