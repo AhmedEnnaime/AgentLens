@@ -8,25 +8,46 @@
   "snapshot": true,
   "instructions": ["AGENTS.md"],
   "permission": {
+    "read": {
+      "*": "allow",
+      ".env": "deny",
+      ".env.*": "deny",
+      "**/.env": "deny",
+      "**/.env.*": "deny"
+    },
     "edit": "allow",
     "bash": {
       "*": "allow",
       "git push --force*": "deny",
+      "git push * --force*": "deny",
       "git push -f*": "deny",
+      "git push * -f*": "deny",
       "git commit --amend*": "deny",
+      "git commit * --amend*": "deny",
       "git rebase -i*": "deny",
+      "git rebase --interactive*": "deny",
+      "git rebase * -i*": "deny",
       "git reset --hard*": "deny",
+      "git reset * --hard*": "deny",
       "git filter-branch*": "deny",
+      "git filter-repo*": "deny",
       "rm -rf*": "deny",
       "rm -fr*": "deny",
+      "rm * -rf*": "deny",
+      "rm * -fr*": "deny",
       "sudo *": "deny",
-      "curl * | bash*": "deny",
-      "curl * | sh*": "deny",
-      "gh pr merge *": "deny",
+      "curl *|*sh*": "deny",
+      "wget *|*sh*": "deny",
+      "gh pr merge*": "deny",
       "gh repo delete*": "deny"
     },
     "external_directory": {
-      "*": "deny"
+      "*": "deny",
+      "~/.local/share/opencode/**": "allow",
+      "~/.config/opencode/**": "allow",
+      "~/.claude/**": "allow",
+      "/tmp/**": "allow",
+      "/private/tmp/**": "allow"
     }
   },
   "agent": {
