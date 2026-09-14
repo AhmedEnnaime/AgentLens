@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "username": "AhmedEnnaime",
+  "model": "ollama/glm-5.3:cloud",
+  "small_model": "ollama/glm-5.3:cloud",
+  "share": "disabled",
+  "autoupdate": "notify",
+  "snapshot": true,
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "allow",
+      "git push --force*": "deny",
+      "git push -f*": "deny",
+      "git commit --amend*": "deny",
+      "git rebase -i*": "deny",
+      "git reset --hard*": "deny",
+      "git filter-branch*": "deny",
+      "rm -rf*": "deny",
+      "rm -fr*": "deny",
+      "sudo *": "deny",
+      "curl * | bash*": "deny",
+      "curl * | sh*": "deny",
+      "gh pr merge *": "deny",
+      "gh repo delete*": "deny"
+    },
+    "external_directory": {
+      "*": "deny"
+    }
+  },
+  "agent": {
+    "architect": { "mode": "subagent" },
+    "format-investigator": { "mode": "subagent" },
+    "implementer": { "mode": "subagent" },
+    "reviewer": { "mode": "subagent" },
+    "test-engineer": { "mode": "subagent" },
+    "documenter": { "mode": "subagent" }
+  },
+  "compaction": {
+    "auto": true,
+    "tail_turns": 15
+  },
+  "tool_output": {
+    "max_lines": 200,
+    "max_bytes": 8192
+  }
+}
