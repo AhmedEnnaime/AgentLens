@@ -1,4 +1,3 @@
-// Package main is the entrypoint for the agentlens CLI.
 package main
 
 import (
@@ -6,7 +5,6 @@ import (
 	"os"
 )
 
-// version is set at build time via -ldflags; dev builds show "dev".
 var version = "dev"
 
 func main() {
