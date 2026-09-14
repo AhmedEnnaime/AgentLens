@@ -11,14 +11,21 @@ if [ ! -d "$src" ]; then
   exit 1
 fi
 
+shopt -s nullglob
+sources=("$src"/*.md)
+
+if [ "${#sources[@]}" -eq 0 ]; then
+  echo "no agent definitions found in agents/ — refusing to wipe destinations" >&2
+  exit 1
+fi
+
 mkdir -p "$opencode_dir" "$claude_dir"
 
-find "$opencode_dir" -name '*.md' -type f ! -name 'README.md' -delete
-find "$claude_dir" -name '*.md' -type f ! -name 'README.md' -delete
+find "$opencode_dir" -name '*.md' -type f -delete
+find "$claude_dir" -name '*.md' -type f -delete
 
 copied=0
-for file in "$src"/*.md; do
-  [ -e "$file" ] || continue
+for file in "${sources[@]}"; do
   name="$(basename "$file" .md)"
   cp "$file" "$opencode_dir/$name.md"
   cp "$file" "$claude_dir/$name.md"
