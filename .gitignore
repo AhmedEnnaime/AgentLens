@@ -18,6 +18,7 @@ go.work.sum
 *.db-wal
 *.db-shm
 .agentlens/
+!testdata/fixtures/**/*.db
 
 # Environment / secrets
 .env

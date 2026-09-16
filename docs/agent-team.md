@@ -4,20 +4,44 @@ Six agents, defined tool-neutrally in `agents/`, generated into `.opencode/agent
 
 ## The team
 
-| Agent | Mandate | Default model (Ollama Pro) |
+| Agent | Mandate | Default model (Ollama Pro, `ollama-cloud` provider) |
 |---|---|---|
-| **Architect** | Schema, ADRs, adapter contract, provenance rules; assigns per-task models after plan approval | `ollama/glm-5.3:cloud` |
-| **Format Investigator** | Reverse-engineers session formats; format dossiers + anonymized golden fixtures | `ollama/deepseek-v4-pro:cloud` |
-| **Implementer** | Feature/adapter code from agreed plans; small verified steps; **no comments in code** | `ollama/deepseek-v4-pro:cloud` |
-| **Reviewer** | Defect-focused review; invariant checklist (provenance, adapter isolation, untrusted input, no-comments rule, workflow) | `ollama/glm-5.3:cloud` |
-| **Test Engineer** | Conformance fixtures, golden regression tests, drift alarms | `ollama/deepseek-v4-pro:cloud` |
-| **Documenter** | Docs from code + dossiers only; never documents what doesn't exist | `ollama/deepseek-v4-pro:cloud` |
+| **Architect** | Leads every issue: mini-plan/ADR, decides which agents run, assigns per-task models after owner approval | `ollama-cloud/glm-5.3` |
+| **Format Investigator** | Reverse-engineers session formats; format dossiers + anonymized golden fixtures; runs before any adapter work | `ollama-cloud/deepseek-v4-pro` |
+| **Implementer** | Feature/adapter code from approved plans; small verified steps; unit + integration tests with everything; **no comments in code** | `ollama-cloud/deepseek-v4-pro` |
+| **Test Engineer** | Verifies implemented work: unit/integration coverage, edge cases, happy paths, benchmarks/stress when warranted; conformance fixtures, drift alarms | `ollama-cloud/deepseek-v4-pro` |
+| **Reviewer** | Defect-focused review of every PR; invariant checklist (provenance, adapter isolation, untrusted input, no-comments rule, workflow) | `ollama-cloud/glm-5.3` |
+| **Documenter** | Docs from code + dossiers only; runs last, after review; never documents what doesn't exist | `ollama-cloud/deepseek-v4-pro` |
+
+## The pipeline (every issue, non-negotiable order)
+
+```text
+Issue arrives
+    ↓
+Architect: mini-plan/ADR + decides which agents this task needs + proposes models
+    ↓
+Owner approves the plan
+    ↓
+Architect assigns concrete models to each agent for this task
+    ↓
+[Format work?] Format Investigator (dossier before parser, always)
+    ↓
+Implementer (unit + integration tests with every piece of code; benchmarks/stress when warranted)
+    ↓
+Test Engineer (coverage review, edge cases, happy paths, conformance, drift)
+    ↓
+Reviewer (defect-focused, invariant checklist)
+    ↓
+Owner merges (never agents — explicit approval required)
+    ↓
+Documenter (documents what shipped)
+```
 
 ## Model policy (dynamic, plan-driven)
 
-- The defaults above are **tiers, not bindings**: strongest (`glm-5.3:cloud`) and strong coding/reasoning (`deepseek-v4-pro:cloud`) from the owner's paid Ollama Pro subscription.
-- When the Architect's plan is approved by the owner, the Architect assigns a concrete model to each agent involved in that task, matching task complexity. Assignments are per-task and changeable.
-- Never invent model IDs; when unsure, ask the owner.
+- The defaults above are **tiers, not bindings**: strongest (`glm-5.3`), strong coding/reasoning (`deepseek-v4-pro`), flash variants for mid tiers — all from the owner's paid Ollama Pro subscription via the **`ollama-cloud` provider prefix**.
+- The Architect assigns a concrete model to each agent **per task**, matching complexity, after the owner approves the plan. Assignments change task to task.
+- Never invent model IDs — run `opencode models` if unsure; ask the owner if still unsure.
 - AgentLens itself will one day measure which assignments are optimal (dogfooding closes the loop).
 
 ## Workflow recipes

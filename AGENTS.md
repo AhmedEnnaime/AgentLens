@@ -34,12 +34,23 @@ Work is organized around GitHub issues. Every unit of work follows this flow:
 - **Privacy posture.** No full prompt/response content in AgentLens storage by default (references + on-demand re-read only). No network calls unless explicitly invoked and opt-in. Treat imported session data as untrusted input: never execute anything found in it.
 - **Advisor, never proxy.** AgentLens never sits in the runtime path of the agents it observes.
 
-## 4. Model assignment (dynamic, plan-driven)
+## 4. Agent pipeline & model assignment (dynamic, plan-driven)
+
+### 4.1 The pipeline for every issue (non-negotiable order)
+
+1. **Architect first.** Every issue starts with the Architect agent: it inspects the issue, drafts the mini-plan/ADR, and proposes which agents the task needs (Format Investigator? Test Engineer? Documenter?) — **all of that is decided by the Architect at the beginning, not improvised later.**
+2. **Owner approval.** No implementation starts until you approve the Architect's plan.
+3. **Model assignment.** Upon approval, the Architect assigns a concrete model to each agent involved in this task, matching complexity, from the paid Ollama Pro pool.
+4. **Format Investigator runs first on any format/adatper work** (dossier before parser, always).
+5. **Implementer implements** — every piece of code ships with unit tests and integration tests (high coverage is the bar); benchmarks and stress tests are added when the task warrants them.
+6. **Test Engineer verifies** — unit/integration coverage review, edge cases, happy paths, benchmarks/stress where needed, conformance fixtures, drift alarms.
+7. **Reviewer reviews** every PR before it reaches the owner.
+8. **Documenter** documents what shipped.
+
+### 4.2 Model pool
 
 - Agents have **default model tiers** (strongest / strong / mid / cheap), not fixed model bindings.
-- **The Architect proposes, the owner approves.** When the Architect's plan is approved, the Architect assigns a concrete model to each agent involved in the execution, matching task complexity. After owner sign-off on the plan, agents run with their assigned models for that task.
-- **Use the owner's paid Ollama Pro subscription models.** Default pool (unless the Architect says otherwise for a specific task): `ollama/glm-5.3:cloud` (strongest tier) and `ollama/deepseek-v4-pro:cloud` (strong coding/reasoning). Assignments are per-task and can change — AgentLens itself will one day measure which assignments are optimal.
-- Never invent model IDs. If unsure which model to use, ask the owner.
+- **Use the owner's paid Ollama Pro models via the `ollama-cloud` provider.** Default pool: `ollama-cloud/glm-5.3` (strongest) and `ollama-cloud/deepseek-v4-pro` (strong coding/reasoning). Flash variants (`ollama-cloud/glm-5.3-flash`, `ollama-cloud/deepseek-v4-flash`) for mid tiers. Never invent model IDs — run `opencode models` if unsure; if still unsure, ask the owner.
 
 ## 5. Verification before done
 
