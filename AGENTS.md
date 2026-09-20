@@ -27,9 +27,10 @@ Work is organized around GitHub issues. Every unit of work follows this flow:
 
 ## 3. Architecture discipline
 
+- **Domain-Driven Design is the standing architecture.** The codebase is organized by bounded contexts as packages, not by technical layer: `internal/domain` (canonical model: Trace/Span/Event, Provenance, Value objects — the center; imported by everything, imports nothing), `internal/ingest/<agent>/` (adapters = anti-corruption layer; agent-native concepts never leak past this boundary), `internal/normalize`, `internal/analysis` (metrics, completeness, smells — pure domain services), `internal/storage` (repository implementations behind interfaces defined in the domain), `internal/cli` (presentation — renders, never computes). Entities carry their invariants (`Validate()`); Value objects are small immutable types (`Provenance`, `Value[T]`, `ModelIdentity`, `Usage`, `Cost`). Tactical-DDD ceremony (domain events, CQRS) is deliberately **not** used until evidence demands it — strategic DDD (bounded contexts, ubiquitous language, ACLs) is the bar.
 - **Provenance everywhere.** Every computed value carries a provenance label (`observed`, `derived`, `estimated`, `inferred`, `unavailable`). Never present one as another. No fabricated telemetry — ever.
 - **Raw events are immutable truth.** Everything derived is rebuildable from raw events. Never mutate stored raw data.
-- **No agent-specific parsing outside adapter boundaries.** OpenCode/Claude Code specifics live only in their adapter packages.
+- **No agent-specific parsing outside adapter boundaries.** OpenCode/Claude Code specifics live only in their adapter packages under `internal/ingest/`.
 - **Schema changes require an ADR** approved by the Architect agent (and the owner for breaking changes).
 - **Privacy posture.** No full prompt/response content in AgentLens storage by default (references + on-demand re-read only). No network calls unless explicitly invoked and opt-in. Treat imported session data as untrusted input: never execute anything found in it.
 - **Advisor, never proxy.** AgentLens never sits in the runtime path of the agents it observes.
