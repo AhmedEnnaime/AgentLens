@@ -7,5 +7,5 @@
   "rows": {"sessions": 1, "child_sessions": 0, "messages": 3, "parts": 9},
   "notes": "event table trimmed to 10 sample rows (projection, not source of truth); session ids preserved for referential integrity; dangling parent_id in tool-heavy fixture is by design (its parent session lives in subagent-tree fixture)",
   "anonymization": ["usernames in paths -> /Users/user", "github owner name -> GH-OWNER", "project names -> placeholders", "known emails -> EMAIL-REDACTED", "oversized summary.diffs and tool outputs > 50KB truncated"],
-  "provenance": "captured via sqlite3 .backup from live install 2026-09-14"
+  "provenance": "captured via sqlite3 .backup from live install 2026-09-20"
 }
