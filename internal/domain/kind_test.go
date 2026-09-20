@@ -125,3 +125,15 @@ func TestStatusJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestEnumUnknownMarshalJSONErrors(t *testing.T) {
+	if _, err := json.Marshal(SpanKind(200)); err == nil {
+		t.Error("marshal unknown span kind should error")
+	}
+	if _, err := json.Marshal(EventKind(200)); err == nil {
+		t.Error("marshal unknown event kind should error")
+	}
+	if _, err := json.Marshal(Status(200)); err == nil {
+		t.Error("marshal unknown status should error")
+	}
+}

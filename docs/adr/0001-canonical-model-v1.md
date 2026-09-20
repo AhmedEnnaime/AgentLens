@@ -304,6 +304,11 @@ JSON tags on all types, snake_case, enums as their lowercase canonical strings. 
 - Rollback path: this is the v0.1 model; Claude Code (v0.2) is the schema-validation milestone — any type it can't produce honestly triggers an ADR revision, not a hack.
 - Upstream drift risk accepted (GenAI semconv is `Development` status): adopted names are confined to `gen_ai.*` attributes whose semantics are stable; migration is an ADR with alias support.
 
+**Reviewer follow-up 2026-09-14:**
+
+- **FinishReason reconciliation.** The core validator enforces `FinishReason` presence only negatively — it forbids the field on non-`model_call` spans, but does not require it on `model_call` spans, because incomplete calls (zero `EndTime`) may honestly lack a finish reason. In practice adapters write `FinishReason` for completed model_calls, so it is required-on-write for completed calls while remaining permitted-to-omit for incomplete ones.
+- **Capabilities tightening (accepted).** The rule that `CacheTokenUsage`/`ReasoningTokenUsage` require `PerCallUsage` is an accepted validation tightening not in the original type inventory. It prevents a capability contradiction: per the dossier, cache/reasoning token fields only exist when per-call usage exists.
+
 ---
 
 ---

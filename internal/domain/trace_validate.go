@@ -35,6 +35,9 @@ func (t *Trace) validateSpans(idx spanIndex) []error {
 			errs = append(errs, errors.New("span: empty id"))
 			continue
 		}
+		if s.TraceID != t.ID {
+			errs = append(errs, fmt.Errorf("span %s: trace id %q does not match trace %q", s.ID, s.TraceID, t.ID))
+		}
 		if _, dup := seen[s.ID]; dup {
 			errs = append(errs, fmt.Errorf("span %s: duplicate id", s.ID))
 		}

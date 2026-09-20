@@ -15,7 +15,7 @@ func modelCall(id, parent string) *Span {
 		Name:     "chat glm-5.3",
 		Status:   StatusOk,
 		Model: &ModelIdentity{
-			ProviderID: "opencode",
+			ProviderID: "ollama-cloud",
 			ModelID:    "glm-5.3",
 			Variant:    Unavailable[string](),
 		},
@@ -246,6 +246,68 @@ func TestIncompleteEndTimeAllowed(t *testing.T) {
 func TestNilTraceValidate(t *testing.T) {
 	var tr *Trace
 	if err := tr.Validate(); err == nil {
-		t.Error("nil trace should error on empty id")
+		t.Error("nil trace should error on nil trace")
+	}
+}
+
+func TestSpanTraceIDMustMatchTrace(t *testing.T) {
+	tr := happyTrace()
+	tr.Spans[1].TraceID = "other-trace"
+	err := tr.Validate()
+	if err == nil {
+		t.Fatal("span with foreign TraceID should fail validation")
+	}
+	if !strings.Contains(err.Error(), "does not match trace") {
+		t.Errorf("error %q should mention trace id mismatch", err)
+	}
+}
+
+func TestModelCallInnerFieldWrappedErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Trace)
+		wantSub string
+	}{
+		{
+			"invalid model variant",
+			func(tr *Trace) {
+				tr.Spans[2].Model = &ModelIdentity{ProviderID: "p", ModelID: "m", Variant: Observed("max", "")}
+			},
+			"model",
+		},
+		{
+			"invalid usage input tokens",
+			func(tr *Trace) {
+				tr.Spans[2].Usage = &Usage{InputTokens: Observed(int64(10), "")}
+			},
+			"usage",
+		},
+		{
+			"invalid cost amount",
+			func(tr *Trace) {
+				tr.Spans[2].Cost = &Cost{Amount: Estimated(1.0, ""), Currency: "USD"}
+			},
+			"cost",
+		},
+		{
+			"invalid finish reason",
+			func(tr *Trace) {
+				tr.Spans[2].FinishReason = Observed("stop", "")
+			},
+			"finish reason",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tr := happyTrace()
+			c.mutate(tr)
+			err := tr.Validate()
+			if err == nil {
+				t.Fatalf("expected validation error for %s", c.name)
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("%s: error %q should contain %q", c.name, err, c.wantSub)
+			}
+		})
 	}
 }
