@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -98,6 +99,57 @@ func TestUnavailableJSONNullValue(t *testing.T) {
 	}
 	if m["provenance"] != "unavailable" {
 		t.Errorf("unavailable provenance = %v, want unavailable", m["provenance"])
+	}
+}
+
+func TestUnmarshalNullValueRequiresUnavailableProvenance(t *testing.T) {
+	cases := []struct {
+		prov Provenance
+		want bool
+	}{
+		{ProvenanceUnavailable, true},
+		{ProvenanceObserved, false},
+		{ProvenanceDerived, false},
+		{ProvenanceEstimated, false},
+		{ProvenanceInferred, false},
+	}
+	t.Run("int64", func(t *testing.T) {
+		for _, c := range cases {
+			data := []byte(fmt.Sprintf(`{"value":null,"provenance":%q,"source_ref":"r"}`, c.prov.String()))
+			var v Value[int64]
+			err := json.Unmarshal(data, &v)
+			if (err == nil) != c.want {
+				t.Errorf("%s with null value: err=%v, want valid=%v", c.prov, err, c.want)
+			}
+		}
+	})
+	t.Run("float64", func(t *testing.T) {
+		for _, c := range cases {
+			data := []byte(fmt.Sprintf(`{"value":null,"provenance":%q,"source_ref":"r"}`, c.prov.String()))
+			var v Value[float64]
+			err := json.Unmarshal(data, &v)
+			if (err == nil) != c.want {
+				t.Errorf("%s with null value: err=%v, want valid=%v", c.prov, err, c.want)
+			}
+		}
+	})
+	t.Run("string", func(t *testing.T) {
+		for _, c := range cases {
+			data := []byte(fmt.Sprintf(`{"value":null,"provenance":%q,"source_ref":"r"}`, c.prov.String()))
+			var v Value[string]
+			err := json.Unmarshal(data, &v)
+			if (err == nil) != c.want {
+				t.Errorf("%s with null value: err=%v, want valid=%v", c.prov, err, c.want)
+			}
+		}
+	})
+}
+
+func TestUnmarshalNonNullValueRejectsUnavailableProvenance(t *testing.T) {
+	data := []byte(`{"value":42,"provenance":"unavailable","source_ref":""}`)
+	var v Value[int64]
+	if err := json.Unmarshal(data, &v); err == nil {
+		t.Error("unavailable provenance with non-null value should error")
 	}
 }
 

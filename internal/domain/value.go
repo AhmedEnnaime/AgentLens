@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -79,11 +80,21 @@ func (v *Value[T]) UnmarshalJSON(data []byte) error {
 	}
 	v.Provenance = prov
 	v.SourceRef = raw.SourceRef
-	if prov == ProvenanceUnavailable {
+	if isJSONNull(raw.Value) {
+		if prov != ProvenanceUnavailable {
+			return fmt.Errorf("value: null value requires unavailable provenance, got %s", prov)
+		}
 		return nil
+	}
+	if prov == ProvenanceUnavailable {
+		return fmt.Errorf("value: unavailable provenance requires a null value")
 	}
 	if err := json.Unmarshal(raw.Value, &v.V); err != nil {
 		return err
 	}
 	return nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
