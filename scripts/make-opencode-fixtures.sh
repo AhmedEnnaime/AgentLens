@@ -43,11 +43,29 @@ python3 - "$tmp/snapshot.db" << 'PYEOF'
 import re, sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])
 pattern = re.compile(r'(?<![\w@.-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|net|org|io|ma|dev|co|me)(?![\w.-])')
-def scrub(text):
-    return pattern.sub('EMAIL-REDACTED', text)
+
+def redact_strings(node):
+    if isinstance(node, dict):
+        return {k: redact_strings(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [redact_strings(v) for v in node]
+    if isinstance(node, str):
+        return pattern.sub('EMAIL-REDACTED', node)
+    return node
+
+def load_safe(text):
+    try:
+        return json.loads(text), True
+    except Exception:
+        return None, False
+
+import json
 for table in ('message', 'part', 'event'):
     for (rowid, data) in list(conn.execute(f'SELECT rowid, data FROM {table} WHERE data LIKE "%@%"')):
-        new = scrub(data)
+        parsed, ok = load_safe(data)
+        if not ok:
+            continue
+        new = json.dumps(redact_strings(parsed), ensure_ascii=False, separators=(',', ':'))
         if new != data:
             conn.execute(f'UPDATE {table} SET data = ? WHERE rowid = ?', (new, rowid))
 conn.commit()
@@ -149,6 +167,12 @@ PYEOF
   )
   if [ "$emails" -ne 0 ]; then
     echo "LEAK FAILURE in $db: $emails rows contain email addresses" >&2
+    exit 1
+  fi
+  local invalid_json
+  invalid_json=$(sqlite3 "$db" "SELECT (SELECT COUNT(*) FROM message WHERE NOT json_valid(data)) + (SELECT COUNT(*) FROM part WHERE NOT json_valid(data)) + (SELECT COUNT(*) FROM event WHERE NOT json_valid(data));")
+  if [ "$invalid_json" -ne 0 ]; then
+    echo "JSON FAILURE in $db: $invalid_json rows contain invalid JSON" >&2
     exit 1
   fi
   local fk_violations
