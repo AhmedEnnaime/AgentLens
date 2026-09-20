@@ -3,7 +3,7 @@ package domain
 import "time"
 
 func FromEpochMillis(ms int64) time.Time {
-	return time.Unix(0, ms*int64(time.Millisecond)).UTC()
+	return time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond)).UTC()
 }
 
 func ToEpochMillis(t time.Time) int64 {
