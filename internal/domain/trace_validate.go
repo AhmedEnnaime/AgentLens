@@ -6,6 +6,9 @@ import (
 )
 
 func (t *Trace) Validate() error {
+	if t == nil {
+		return errors.New("trace: nil trace")
+	}
 	var errs []error
 	if t.ID == "" {
 		errs = append(errs, errors.New("trace: empty id"))
