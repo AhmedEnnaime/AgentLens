@@ -72,12 +72,9 @@ Re-ingest of the same session is a no-op on all rows except `traces.header`, whi
 
 ## Appendix A — DDL (`0001_init.sql`)
 
-```sql
-CREATE TABLE schema_version (
-	version    INTEGER PRIMARY KEY,
-	applied_at INTEGER NOT NULL
-);
+The `schema_version` table is bootstrapped by the migration runner itself (`CREATE TABLE IF NOT EXISTS`, before the version read), so it is not part of `0001_init.sql`:
 
+```sql
 CREATE TABLE traces (
 	id                TEXT PRIMARY KEY,
 	agent             TEXT NOT NULL,
