@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/AhmedEnnaime/AgentLens/internal/domain"
 )
@@ -397,6 +398,119 @@ func TestNilEventsRoundTripByteIdentical(t *testing.T) {
 	}
 	if !bytes.Equal(pre, post) {
 		t.Errorf("nil events broke byte-identity (events:null vs events:[])\npre:  %s\npost: %s", pre, post)
+	}
+}
+
+func TestEmptyNonNilEventsRejectedPreWrite(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr := validTrace("t1")
+	tr.Events = []*domain.Event{}
+	raw := []*domain.RawEvent{rawEvent("r1", "t1", json.RawMessage(`{"a":1}`))}
+	err := s.Ingest(ctx, tr, raw)
+	if err == nil {
+		t.Fatal("expected gate error for empty non-nil events")
+	}
+	if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("gate error must be a plain error, got %v", err)
+	}
+	trc, spc, evc, rac := allTableCounts(t, s)
+	if trc != 0 || spc != 0 || evc != 0 || rac != 0 {
+		t.Errorf("gate must persist nothing: traces=%d spans=%d events=%d raws=%d", trc, spc, evc, rac)
+	}
+}
+
+func TestPreallocatedThenFilledEventsPassGate(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr := validTrace("t1")
+	events := make([]*domain.Event, 0, 4)
+	events = append(events,
+		&domain.Event{ID: "e1", SpanID: "mc", Kind: domain.EventFileEdit, Time: tr.EndTime},
+		&domain.Event{ID: "e2", SpanID: "mc", Kind: domain.EventFileEdit, Time: tr.EndTime},
+		&domain.Event{ID: "e3", SpanID: "turn", Kind: domain.EventSessionCompaction, Time: tr.EndTime},
+		&domain.Event{ID: "e4", SpanID: "s", Kind: domain.EventTaskMarker, Time: tr.EndTime},
+	)
+	tr.Events = events
+	raw := []*domain.RawEvent{rawEvent("r1", "t1", json.RawMessage(`{"a":1}`))}
+	if err := s.Ingest(ctx, tr, raw); err != nil {
+		t.Fatalf("preallocated-then-filled events must pass gate: %v", err)
+	}
+	pre, err := json.Marshal(tr)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := s.TraceByID(ctx, "t1")
+	if err != nil {
+		t.Fatalf("TraceByID: %v", err)
+	}
+	post, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal got: %v", err)
+	}
+	if !bytes.Equal(pre, post) {
+		t.Errorf("preallocated events not byte-identical\npre:  %s\npost: %s", pre, post)
+	}
+}
+
+func TestZeroStartTimeRejectedPreWrite(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr := validTrace("t1")
+	tr.StartTime = time.Time{}
+	raw := []*domain.RawEvent{rawEvent("r1", "t1", json.RawMessage(`{"a":1}`))}
+	err := s.Ingest(ctx, tr, raw)
+	if err == nil {
+		t.Fatal("expected zero start_time to be rejected")
+	}
+	if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("start_time gate error must be a plain error, got %v", err)
+	}
+	trc, spc, evc, rac := allTableCounts(t, s)
+	if trc != 0 || spc != 0 || evc != 0 || rac != 0 {
+		t.Errorf("gate must persist nothing: traces=%d spans=%d events=%d raws=%d", trc, spc, evc, rac)
+	}
+}
+
+func TestAttributesNilAndEmptyRoundTripByteIdentical(t *testing.T) {
+	placements := []struct {
+		name string
+		set  func(*domain.Trace)
+	}{
+		{"trace nil", func(tr *domain.Trace) { tr.Attributes = nil }},
+		{"trace empty", func(tr *domain.Trace) { tr.Attributes = map[string]any{} }},
+		{"span nil", func(tr *domain.Trace) { tr.Spans[0].Attributes = nil }},
+		{"span empty", func(tr *domain.Trace) { tr.Spans[0].Attributes = map[string]any{} }},
+		{"event nil", func(tr *domain.Trace) { tr.Events[0].Attributes = nil }},
+		{"event empty", func(tr *domain.Trace) { tr.Events[0].Attributes = map[string]any{} }},
+	}
+	for _, p := range placements {
+		t.Run(p.name, func(t *testing.T) {
+			s := openTemp(t)
+			ctx := context.Background()
+			tr := validTrace("t1")
+			tr.Events[0].Attributes = map[string]any{"seed": "x"}
+			p.set(tr)
+			raw := []*domain.RawEvent{rawEvent("r1", "t1", json.RawMessage(`{"a":1}`))}
+			if err := s.Ingest(ctx, tr, raw); err != nil {
+				t.Fatalf("ingest: %v", err)
+			}
+			pre, err := json.Marshal(tr)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got, err := s.TraceByID(ctx, "t1")
+			if err != nil {
+				t.Fatalf("TraceByID: %v", err)
+			}
+			post, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal got: %v", err)
+			}
+			if !bytes.Equal(pre, post) {
+				t.Errorf("attributes %s not byte-identical\npre:  %s\npost: %s", p.name, pre, post)
+			}
+		})
 	}
 }
 

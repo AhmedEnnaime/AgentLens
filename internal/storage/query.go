@@ -99,17 +99,16 @@ func (s *Store) eventsByTrace(ctx context.Context, traceID string) ([]*domain.Ev
 func (s *Store) ListTraces(ctx context.Context, f domain.TraceFilter) ([]domain.TraceSummary, error) {
 	query := `
 		SELECT t.id, t.agent, t.root_session_id, t.project_directory, t.start_time, t.end_time,
-		       COUNT(DISTINCT s.id), COUNT(DISTINCT e.id), COUNT(DISTINCT r.id)
-		FROM traces t
-		LEFT JOIN spans s ON s.trace_id = t.id
-		LEFT JOIN events e ON e.trace_id = t.id
-		LEFT JOIN raw_events r ON r.trace_id = t.id`
+		       (SELECT COUNT(*) FROM spans sp WHERE sp.trace_id = t.id),
+		       (SELECT COUNT(*) FROM events ev WHERE ev.trace_id = t.id),
+		       (SELECT COUNT(*) FROM raw_events re WHERE re.trace_id = t.id)
+		FROM traces t`
 	args := make([]any, 0, 1)
 	if f.ProjectDirectory != "" {
 		query += ` WHERE t.project_directory = ?`
 		args = append(args, f.ProjectDirectory)
 	}
-	query += ` GROUP BY t.id ORDER BY t.start_time DESC, t.id`
+	query += ` ORDER BY t.start_time DESC, t.id`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

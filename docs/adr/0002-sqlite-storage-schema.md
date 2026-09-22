@@ -212,3 +212,69 @@ CREATE TABLE raw_events (
 	UNIQUE (trace_id, seq)
 );
 ```
+
+## Amendment B (2026-09-15): nil-vs-empty slice semantics — Events gated, Attributes collapsed by the wire
+
+Found during the #6 review, after the Test Engineer's adversarial pass. D3
+promises byte-identity of the reassembled full-trace marshal, but SQL row
+counts cannot distinguish `Events == nil` from `Events == []*Event{}`: both
+persist zero event rows, and reassembly (post-fix, correctly) returns nil
+for zero rows. A trace ingested with `Events: []` — legal under
+`Validate()`, and the natural result of `make([]*Event, 0, n)` in an
+adapter that finds no events — reassembles as nil, marshals
+`"events":null` against the input's `"events":[]`, and violates D3 on a
+legal input. Spans cannot hit this: `Validate` requires exactly one root
+span, so a valid trace never carries an empty `Spans`. The question
+generalizes to `Attributes` on trace/span/event; both directions are
+ruled here.
+
+**Decision.** The canonical model speaks one form for "no events": absent.
+`Ingest` rejects an empty-non-nil `trace.Events` at the gate (fail-loud,
+same posture as the Amendment A zero-`captured_at` gate). Nil and
+non-empty are the only accepted shapes, and this is a contract on every
+producer feeding a `domain.TraceIngestor`, not a storage implementation
+detail. An empty-non-nil Events is not a fact about the observed session —
+it is a construction artifact of the producing code — and Amendment A's
+principle applies verbatim: never persist an undefined distinction. The
+alternative (a header emptiness marker preserving both forms) was
+rejected: it canonizes a producer quirk into the durable format, adds a
+marker↔tree consistency invariant, and taxes every future serialization
+surface (#14 share, v0.5 HTTP) with a bookkeeping bit that carries zero
+observational semantics.
+
+`Attributes` needs no gate: ADR-1's wire shape (`omitempty` on trace,
+span, and event) already collapses nil and empty to the same bytes — both
+omit the key, both reassemble as nil, and byte-identity holds in both
+directions by construction. The distinction does not survive the wire;
+nothing may depend on it.
+
+**Contract consequences (adapters #8/#9 read this).**
+
+- Builders may pre-allocate freely (`make([]*Event, 0, n)` + append); the
+  gate judges the value at the boundary, not the construction style. A
+  trace reaching `Ingest` with zero events must carry them as nil.
+- The gate error is a plain error (not `ErrConflict`, not `ErrNotFound`)
+  — callers cannot mistake it for idempotency machinery.
+- Any implementation of `domain.TraceIngestor` enforces the same
+  precondition; storage's gate is the reference behavior.
+- No gate on `Attributes` (trace/span/event) and none on `Spans`
+  (unreachable: `Validate` demands exactly one root span).
+
+**Ripple effects: none.** No DDL, no domain change, no header mirror
+change, no migration (zero databases exist — same delivery situation as
+Amendment A). `content_sha256` is unaffected: zero events hash
+identically in both shapes, and the empty shape never reaches the hash.
+No byte-identity promise exists on the list returns of `ListTraces` /
+`RawEventsByTrace` or on the `raw` input slice; their emptiness shape is
+presentation, not contract.
+
+**Test obligations (both directions, regression suite).**
+
+- Events nil → reassembles nil; marshal byte-identical (`"events":null`).
+- Events `[]` → `Ingest` fails with the gate error and persists nothing
+  (the gate fires before the transaction begins).
+- Pre-allocated-then-filled events pass (pins that capacity is not the
+  crime).
+- Attributes nil and Attributes `{}` (on the trace, a span, and an
+  event) each round-trip byte-identically (pins the wire collapse as
+  tested fact, not claim).

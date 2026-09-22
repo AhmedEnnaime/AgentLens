@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/AhmedEnnaime/AgentLens/internal/domain"
 )
@@ -249,8 +250,8 @@ func TestTraceByIDPreservesCapturedAtMsFidelity(t *testing.T) {
 	if !got.StartTime.Equal(tr.StartTime) {
 		t.Errorf("start time ms fidelity: got %v, want %v", got.StartTime, tr.StartTime)
 	}
-	if !got.StartTime.Equal(tr.StartTime) {
-		t.Errorf("start time not stable: %v", got.StartTime)
+	if !got.EndTime.Equal(tr.EndTime) {
+		t.Errorf("end time ms fidelity: got %v, want %v", got.EndTime, tr.EndTime)
 	}
 }
 
@@ -284,4 +285,86 @@ func TestRawEventsByTraceEmptyIsNotFound(t *testing.T) {
 	if got == nil || len(got) != 0 {
 		t.Errorf("existing trace with no raws should yield empty non-nil slice, got %v", got)
 	}
+}
+
+func TestListTracesScaleBenchmarkTrace(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr, raw := scaleTrace(2500)
+	if err := s.Ingest(ctx, tr, raw); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	start := time.Now()
+	sums, err := s.ListTraces(ctx, domain.TraceFilter{})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ListTraces: %v", err)
+	}
+	if len(sums) != 1 {
+		t.Fatalf("expected 1 summary, got %d", len(sums))
+	}
+	if sums[0].SpanCount != len(tr.Spans) {
+		t.Errorf("span count: got %d, want %d", sums[0].SpanCount, len(tr.Spans))
+	}
+	if sums[0].RawEventCount != len(raw) {
+		t.Errorf("raw count: got %d, want %d", sums[0].RawEventCount, len(raw))
+	}
+	t.Logf("ListTraces over %d spans / %d raws: %v", len(tr.Spans), len(raw), elapsed)
+	if elapsed >= time.Second {
+		t.Errorf("ListTraces too slow: %v", elapsed)
+	}
+}
+
+func scaleTrace(messages int) (*domain.Trace, []*domain.RawEvent) {
+	start := domain.FromEpochMillis(1000)
+	tr := &domain.Trace{
+		ID:        "scale",
+		Agent:     "opencode",
+		StartTime: start,
+		EndTime:   start.Add(time.Duration(messages) * time.Second),
+		Source: domain.SourceMetadata{
+			RootSessionID:    "session",
+			ProjectDirectory: "/proj",
+		},
+		Spans: []*domain.Span{
+			{ID: "s", TraceID: "scale", Kind: domain.KindSession, Name: "session"},
+		},
+	}
+	raw := make([]*domain.RawEvent, 0, messages*2)
+	for i := 0; i < messages; i++ {
+		turnID := "turn-" + itoa(i)
+		mcID := "mc-" + itoa(i)
+		tr.Spans = append(tr.Spans,
+			&domain.Span{ID: turnID, TraceID: "scale", ParentID: "s", Kind: domain.KindTurn, Name: "turn"},
+			&domain.Span{
+				ID:           mcID,
+				TraceID:      "scale",
+				ParentID:     turnID,
+				Kind:         domain.KindModelCall,
+				Name:         "chat",
+				Status:       domain.StatusOk,
+				Model:        &domain.ModelIdentity{ProviderID: "p", ModelID: "m", Variant: domain.Unavailable[string]()},
+				Usage:        &domain.Usage{InputTokens: domain.Observed(int64(10), "r")},
+				Cost:         &domain.Cost{Amount: domain.Unavailable[float64](), Currency: "USD"},
+				FinishReason: domain.Observed("stop", "r"),
+			},
+		)
+		raw = append(raw, &domain.RawEvent{
+			ID:         "r-" + itoa(i),
+			TraceID:    "scale",
+			Agent:      "opencode",
+			RecordType: "message",
+			Payload:    json.RawMessage(`{"seq":` + itoa(i) + `}`),
+			CapturedAt: start.Add(time.Duration(i) * time.Second),
+		})
+		raw = append(raw, &domain.RawEvent{
+			ID:         "r2-" + itoa(i),
+			TraceID:    "scale",
+			Agent:      "opencode",
+			RecordType: "message",
+			Payload:    json.RawMessage(`{"seq":` + itoa(i) + `,"b":2}`),
+			CapturedAt: start.Add(time.Duration(i) * time.Second),
+		})
+	}
+	return tr, raw
 }

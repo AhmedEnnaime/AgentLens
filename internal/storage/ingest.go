@@ -26,6 +26,12 @@ func (s *Store) Ingest(ctx context.Context, trace *domain.Trace, raw []*domain.R
 	if err := trace.Validate(); err != nil {
 		return err
 	}
+	if trace.Events != nil && len(trace.Events) == 0 {
+		return fmt.Errorf("ingest: trace %s has empty non-nil events", trace.ID)
+	}
+	if trace.StartTime.IsZero() {
+		return fmt.Errorf("ingest: trace %s has zero start_time", trace.ID)
+	}
 	for _, r := range raw {
 		if r == nil {
 			return fmt.Errorf("ingest: nil raw event")
