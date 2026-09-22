@@ -31,5 +31,8 @@ go.work.sum
 *.swo
 .DS_Store
 
+# Internal planning documents (not for public repo)
+docs/planning/
+
 # Node (future UI at v0.5)
 node_modules/
