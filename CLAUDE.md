@@ -24,6 +24,7 @@ Work is organized around GitHub issues. Every unit of work follows this flow:
 - Follow the existing code style of the repo. Mimic naming, structure, and patterns already present.
 - Format with `gofumpt`. CI enforces it.
 - Go 1.27. No third-party dependency without checking it is truly needed.
+- **Use the current Go version's features where they genuinely fit** (survey the release notes when implementing; never force). Known fits: `encoding/json` v1 API is v2-backed under the hood (faster unmarshal arrives free; a v2-API migration is an ADR-level change — don't mix mid-stream); v2's stricter defaults (invalid UTF-8, duplicate names) are a per-issue decision for parsing untrusted agent payloads (adapter work); `uuid` for future inference-run/experiment ids — **not** for span/trace ids (deterministic by ADR-1 design); `runtime/secret` for redaction work; generic methods allowed for type-scoped helpers (interface methods may not declare type parameters).
 
 ## 3. Architecture discipline
 
