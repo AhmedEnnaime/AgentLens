@@ -111,6 +111,9 @@ CREATE TABLE raw_events (
 	trace_id       TEXT NOT NULL,
 	id             TEXT NOT NULL,
 	seq            INTEGER NOT NULL,
+	agent          TEXT NOT NULL,
+	record_type    TEXT NOT NULL,
+	captured_at    INTEGER NOT NULL,
 	payload        BLOB NOT NULL,
 	payload_sha256 TEXT NOT NULL,
 	PRIMARY KEY (trace_id, id),
@@ -129,4 +132,83 @@ CREATE TRIGGER raw_events_immutable_update BEFORE UPDATE ON raw_events
 BEGIN SELECT RAISE(ABORT, 'raw_events is immutable'); END;
 CREATE TRIGGER raw_events_immutable_delete BEFORE DELETE ON raw_events
 BEGIN SELECT RAISE(ABORT, 'raw_events is immutable'); END;
+```
+
+## Amendment A (2026-09-15): raw-event envelope
+
+Found during #6 implementation, before any read code shipped. D6's `raw_events`
+DDL persisted only `trace_id, id, seq, payload, payload_sha256` — but the domain
+`RawEvent` (ADR-1) has six fields: `ID, TraceID, Agent, RecordType, Payload,
+CapturedAt`. Under that DDL `RawEventsByTrace` could not reconstruct `Agent`,
+`RecordType`, or `CapturedAt`: none are columns, and none are reliably present
+in the payload — the payload is verbatim agent-native bytes that storage never
+interprets (adapter isolation). A lossy evidence layer breaks the principle D7
+and AGENTS.md rest on — *everything derived is rebuildable from raw events*:
+`RecordType` is first-class parse-stage metadata that `internal/normalize` (#9)
+and reprocess (v0.2) dispatch on; recovering it would mean re-running adapter
+parsing inside storage. The Implementer correctly halted rather than improvise.
+
+**Decision.** `raw_events` persists the full raw-event envelope as first-class
+columns: `agent TEXT NOT NULL`, `record_type TEXT NOT NULL`, `captured_at
+INTEGER NOT NULL` (epoch ms via `domain.ToEpochMillis`/`FromEpochMillis` — the
+schema-wide time contract). `payload` stays a verbatim `BLOB`; the envelope is
+written alongside the bytes, never re-marshaled into them. This supersedes D2's
+"columns only where SQL needs keys" **for the raw layer only**: D2 was written
+for the derived, rebuildable tables; raw events are the base layer of truth and
+must be self-describing without interpretation. `agent` is required precisely
+because D7 deliberately gives `raw_events` no FK to `traces` — a raw event must
+identify its agent even when its trace row is absent (normalization failed, #9).
+
+**Delivery: folded into `0001_init.sql`, not a new `0002` migration.** The
+never-edit-after-merge freeze attaches at *merge*; `0001_init.sql` exists only
+on the unmerged issue-#6 branch, no binary has shipped, and zero databases exist
+in the wild — there is nothing to upgrade and no backfill to run. A `0002`
+would exist solely to patch a baseline no one ever held and would permanently
+misdescribe v1. The file is edited in place by a normal commit (no history
+rewrite; pre-release dev databases are disposable — delete and re-open). Had
+this branch been merged or any store shipped, the identical delta lands as
+`0002_raw_event_envelope.sql` instead — no exceptions.
+
+**Contract consequences.**
+
+- `Ingest` writes the envelope columns with every insert. A zero `CapturedAt`
+  is rejected at the ingest gate — capture time is always known at capture;
+  never fabricate, never persist an undefined epoch conversion (fail-loud,
+  same posture as the sha-conflict gate, D9).
+- `payload_sha256` remains **payload-only** (SHA-256 over payload bytes). It is
+  the *content* identity of the evidence; the envelope is capture *context* —
+  `CapturedAt` legitimately differs between re-imports of the same record, so
+  hashing it would turn every idempotent re-ingest into a false `ErrConflict`.
+  Same id + same sha → full row skip, no envelope refresh (D8 immutability
+  forbids the update; first-capture time is a fact, not a stale value).
+- `RawEventsByTrace` returns the full envelope, reassembled `ORDER BY seq`
+  (D4). Round-trip byte-identity tests now cover the envelope too: `Agent`/
+  `RecordType` exact, payload `bytes.Equal` (byte-identity, not
+  JSON-equivalence), `CapturedAt` asserted at ms fidelity (ms truncation is
+  the schema-wide contract, same as `traces.start_time`).
+
+**Ripple effects: none.** No index changes — every v0.1 raw-event query is by
+`trace_id`, already covered by the PK and `UNIQUE(trace_id, seq)`. No trigger
+changes — `BEFORE UPDATE ON raw_events` aborts any row update regardless of
+which columns are touched, so immutability extends to the envelope for free.
+D1 (repository contract) is untouched; this correction is what lets storage
+honor it. The domain `RawEvent` and its `Validate()` are untouched (ADR-1); an
+empty `Agent` still satisfies `NOT NULL` and remains an adapter-contract
+matter, not a storage one.
+
+Appendix A's `raw_events` block becomes:
+
+```sql
+CREATE TABLE raw_events (
+	trace_id       TEXT NOT NULL,
+	id             TEXT NOT NULL,
+	seq            INTEGER NOT NULL,
+	agent          TEXT NOT NULL,
+	record_type    TEXT NOT NULL,
+	captured_at    INTEGER NOT NULL,
+	payload        BLOB NOT NULL,
+	payload_sha256 TEXT NOT NULL,
+	PRIMARY KEY (trace_id, id),
+	UNIQUE (trace_id, seq)
+);
 ```

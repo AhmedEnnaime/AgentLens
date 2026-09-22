@@ -36,6 +36,9 @@ func (s *Store) Ingest(ctx context.Context, trace *domain.Trace, raw []*domain.R
 		if r.TraceID != trace.ID {
 			return fmt.Errorf("ingest: raw event %s trace id %q does not match trace %q", r.ID, r.TraceID, trace.ID)
 		}
+		if r.CapturedAt.IsZero() {
+			return fmt.Errorf("ingest: raw event %s has zero captured_at", r.ID)
+		}
 	}
 
 	headerJSON, err := json.Marshal(traceHeader{
@@ -152,9 +155,9 @@ func ingestRawEvents(ctx context.Context, tx *sql.Tx, traceID string, raw []*dom
 		switch {
 		case err == sql.ErrNoRows:
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO raw_events (trace_id, id, seq, payload, payload_sha256)
-				VALUES (?, ?, ?, ?, ?)`,
-				traceID, r.ID, nextSeq, []byte(r.Payload), sha,
+				INSERT INTO raw_events (trace_id, id, seq, agent, record_type, captured_at, payload, payload_sha256)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				traceID, r.ID, nextSeq, r.Agent, r.RecordType, domain.ToEpochMillis(r.CapturedAt), []byte(r.Payload), sha,
 			); err != nil {
 				return err
 			}

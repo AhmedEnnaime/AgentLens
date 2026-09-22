@@ -160,7 +160,7 @@ func TestRawEventsImmutableTriggers(t *testing.T) {
 	}
 	raw := rawHandle(t, path)
 
-	if _, err := raw.Exec(`INSERT INTO raw_events (trace_id, id, seq, payload, payload_sha256) VALUES ('t','r',0,X'7B7D','x')`); err != nil {
+	if _, err := raw.Exec(`INSERT INTO raw_events (trace_id, id, seq, agent, record_type, captured_at, payload, payload_sha256) VALUES ('t','r',0,'opencode','message',1000,X'7B7D','x')`); err != nil {
 		t.Fatalf("seed raw event: %v", err)
 	}
 

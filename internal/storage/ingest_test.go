@@ -101,10 +101,13 @@ type snapshot struct {
 }
 
 type rawRow struct {
-	id  string
-	seq int
-	sha string
-	pay []byte
+	id         string
+	seq        int
+	agent      string
+	recordType string
+	capturedAt int64
+	sha        string
+	pay        []byte
 }
 
 func takeSnapshot(t *testing.T, s *Store, traceID string) snapshot {
@@ -140,13 +143,13 @@ func takeSnapshot(t *testing.T, s *Store, traceID string) snapshot {
 		snap.events = append(snap.events, b)
 	}
 	rows.Close()
-	rows, err = s.db.Query(`SELECT id, seq, payload_sha256, payload FROM raw_events WHERE trace_id = ? ORDER BY seq`, traceID)
+	rows, err = s.db.Query(`SELECT id, seq, agent, record_type, captured_at, payload_sha256, payload FROM raw_events WHERE trace_id = ? ORDER BY seq`, traceID)
 	if err != nil {
 		t.Fatalf("raws: %v", err)
 	}
 	for rows.Next() {
 		var r rawRow
-		if err := rows.Scan(&r.id, &r.seq, &r.sha, &r.pay); err != nil {
+		if err := rows.Scan(&r.id, &r.seq, &r.agent, &r.recordType, &r.capturedAt, &r.sha, &r.pay); err != nil {
 			t.Fatalf("scan raw: %v", err)
 		}
 		snap.raws = append(snap.raws, r)
@@ -180,7 +183,7 @@ func assertSnapshotsEqual(t *testing.T, a, b snapshot) {
 		t.Errorf("raw count: got %d, want %d", len(a.raws), len(b.raws))
 	}
 	for i := range min(len(a.raws), len(b.raws)) {
-		if a.raws[i].id != b.raws[i].id || a.raws[i].seq != b.raws[i].seq || a.raws[i].sha != b.raws[i].sha || !bytes.Equal(a.raws[i].pay, b.raws[i].pay) {
+		if a.raws[i].id != b.raws[i].id || a.raws[i].seq != b.raws[i].seq || a.raws[i].agent != b.raws[i].agent || a.raws[i].recordType != b.raws[i].recordType || a.raws[i].capturedAt != b.raws[i].capturedAt || a.raws[i].sha != b.raws[i].sha || !bytes.Equal(a.raws[i].pay, b.raws[i].pay) {
 			t.Errorf("raw[%d]: got %+v, want %+v", i, a.raws[i], b.raws[i])
 		}
 	}
@@ -343,4 +346,99 @@ func TestPayloadSHAStable(t *testing.T) {
 	if a == c {
 		t.Error("different payloads must hash differently")
 	}
+}
+
+func TestZeroCapturedAtRejected(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr := validTrace("t1")
+	raw := []*domain.RawEvent{
+		{
+			ID:         "r1",
+			TraceID:    "t1",
+			Agent:      "opencode",
+			RecordType: "message",
+			Payload:    json.RawMessage(`{"a":1}`),
+			CapturedAt: time.Time{},
+		},
+	}
+	err := s.Ingest(ctx, tr, raw)
+	if err == nil {
+		t.Fatal("expected zero captured_at to be rejected")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM raw_events`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("no raw rows should be written, got %d", count)
+	}
+}
+
+func TestRawEnvelopeRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr := validTrace("t1")
+	raw := []*domain.RawEvent{
+		{
+			ID:         "r1",
+			TraceID:    "t1",
+			Agent:      "opencode",
+			RecordType: "message",
+			Payload:    json.RawMessage(`{"a":1}`),
+			CapturedAt: domain.FromEpochMillis(1500),
+		},
+	}
+	if err := s.Ingest(ctx, tr, raw); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	snap := takeSnapshot(t, s, "t1")
+	if len(snap.raws) != 1 {
+		t.Fatalf("expected 1 raw, got %d", len(snap.raws))
+	}
+	r := snap.raws[0]
+	if r.agent != "opencode" {
+		t.Errorf("agent: got %q, want %q", r.agent, "opencode")
+	}
+	if r.recordType != "message" {
+		t.Errorf("record type: got %q, want %q", r.recordType, "message")
+	}
+	if r.capturedAt != 1500 {
+		t.Errorf("captured_at: got %d, want %d", r.capturedAt, 1500)
+	}
+	if !bytes.Equal(r.pay, []byte(`{"a":1}`)) {
+		t.Errorf("payload: got %s, want %s", r.pay, `{"a":1}`)
+	}
+}
+
+func TestReingestDifferentCapturedAtIsIdempotent(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	tr := validTrace("t1")
+	raw := []*domain.RawEvent{
+		{
+			ID:         "r1",
+			TraceID:    "t1",
+			Agent:      "opencode",
+			RecordType: "message",
+			Payload:    json.RawMessage(`{"a":1}`),
+			CapturedAt: domain.FromEpochMillis(1500),
+		},
+	}
+	if err := s.Ingest(ctx, tr, raw); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	before := takeSnapshot(t, s, "t1")
+
+	raw[0].CapturedAt = domain.FromEpochMillis(2500)
+	if err := s.Ingest(ctx, tr, raw); err != nil {
+		t.Fatalf("re-ingest with different captured_at: %v", err)
+	}
+	after := takeSnapshot(t, s, "t1")
+
+	if before.raws[0].capturedAt != 1500 {
+		t.Fatalf("first-capture time must be preserved, got %d", before.raws[0].capturedAt)
+	}
+	before.header = after.header
+	assertSnapshotsEqual(t, before, after)
 }
