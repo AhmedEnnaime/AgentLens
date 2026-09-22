@@ -54,7 +54,7 @@ func (s *Store) spansByTrace(ctx context.Context, traceID string) ([]*domain.Spa
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]*domain.Span, 0)
+	var out []*domain.Span
 	for rows.Next() {
 		var blob string
 		if err := rows.Scan(&blob); err != nil {
@@ -78,7 +78,7 @@ func (s *Store) eventsByTrace(ctx context.Context, traceID string) ([]*domain.Ev
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]*domain.Event, 0)
+	var out []*domain.Event
 	for rows.Next() {
 		var blob string
 		if err := rows.Scan(&blob); err != nil {
