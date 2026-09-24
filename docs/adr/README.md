@@ -6,6 +6,7 @@ ADRs document the decisions that shape AgentLens's architecture. Each is numbere
 |---|---|---|
 | [0001](0001-canonical-model-v1.md) | Canonical Model v1 — Hybrid OTel Trace/Span/Event Types with Provenance | Accepted |
 | [0002](0002-sqlite-storage-schema.md) | SQLite Storage Schema, Repository Contract, and Migration Policy | Accepted |
+| [0003](0003-privacy-modes-content-references.md) | Privacy Modes & Content References | Accepted |
 
 ## Format
 
