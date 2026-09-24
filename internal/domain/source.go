@@ -8,4 +8,5 @@ type SourceMetadata struct {
 	ProjectDirectory string    `json:"project_directory"`
 	ImportedAt       time.Time `json:"imported_at"`
 	AgentLensVersion string    `json:"agentlens_version"`
+	PrivacyMode      string    `json:"privacy_mode,omitempty"`
 }
