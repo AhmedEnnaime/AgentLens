@@ -167,6 +167,14 @@ func assertSessionRows(t *testing.T, db *sql.DB, mode config.PrivacyMode, source
 	t.Logf("fixture %s: %d session rows", fixture, count)
 }
 
+var messageRefDriftAlarms = map[string]int{
+	"single-turn":      0,
+	"multi-turn-build": 54,
+	"subagent-tree":    46,
+	"tool-heavy":       1,
+	"cache-heavy":      0,
+}
+
 func assertMessageRows(t *testing.T, db *sql.DB, mode config.PrivacyMode, sourcePath, fixture string) {
 	t.Helper()
 	rows, err := db.Query(`SELECT id, data FROM message`)
@@ -175,6 +183,7 @@ func assertMessageRows(t *testing.T, db *sql.DB, mode config.PrivacyMode, source
 	}
 	defer rows.Close()
 	count := 0
+	refCount := 0
 	for rows.Next() {
 		var id, data string
 		if err := rows.Scan(&id, &data); err != nil {
@@ -185,15 +194,370 @@ func assertMessageRows(t *testing.T, db *sql.DB, mode config.PrivacyMode, source
 		if err != nil {
 			t.Fatalf("strip message %s: %v", id, err)
 		}
-		if !bytes.Equal(stripped, payload) {
-			t.Errorf("message %s payload altered under %s", id, mode)
-		}
-		if len(refs) != 0 {
-			t.Errorf("message %s produced %d refs, want 0", id, len(refs))
-		}
+		verifyMessageStrip(t, mode, sourcePath, payload, stripped, refs)
+		refCount += len(refs)
 		count++
 	}
-	t.Logf("fixture %s: %d message rows", fixture, count)
+	if want, ok := messageRefDriftAlarms[fixture]; ok && refCount != want {
+		t.Errorf("fixture %s: %d message refs, drift alarm expects exactly %d", fixture, refCount, want)
+	}
+	t.Logf("fixture %s: %d message rows, %d refs", fixture, count, refCount)
+}
+
+func verifyMessageStrip(t *testing.T, mode config.PrivacyMode, sourcePath string, payload, stripped []byte, refs []domain.ContentRef) {
+	t.Helper()
+	var srcEnv struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &srcEnv); err != nil {
+		t.Fatalf("parse source message: %v", err)
+	}
+	var srcData map[string]json.RawMessage
+	if err := json.Unmarshal(srcEnv.Data, &srcData); err != nil {
+		t.Fatalf("parse source message data: %v", err)
+	}
+	expectedRefs := expectedMessageRefs(t, srcData, sourcePath)
+	if mode == config.PrivacyContentLocal {
+		if !bytes.Equal(stripped, payload) {
+			t.Errorf("content-local message not byte-identical")
+		}
+		if len(refs) != len(expectedRefs) {
+			t.Errorf("content-local message refs = %d, want %d", len(refs), len(expectedRefs))
+		}
+		for _, ref := range refs {
+			assertRefIntegrity(t, ref, sourcePath, "message", rawForSHA(srcData, ref.SHA256))
+		}
+		return
+	}
+	if len(expectedRefs) == 0 {
+		if len(refs) != 0 {
+			t.Errorf("message produced %d refs, want 0", len(refs))
+		}
+		if !bytes.Equal(stripped, payload) {
+			t.Errorf("nothing-stripped message should return original bytes")
+		}
+		return
+	}
+	if len(refs) != len(expectedRefs) {
+		t.Errorf("message refs = %d, want %d", len(refs), len(expectedRefs))
+	}
+	if bytes.Equal(stripped, payload) {
+		t.Errorf("content-bearing message should be stripped")
+	}
+	var outEnv struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(stripped, &outEnv); err != nil {
+		t.Fatalf("parse stripped message: %v", err)
+	}
+	var outData map[string]json.RawMessage
+	if err := json.Unmarshal(outEnv.Data, &outData); err != nil {
+		t.Fatalf("parse stripped message data: %v", err)
+	}
+	assertMessageContentStripped(t, sourcePath, srcData, outData)
+	for _, ref := range refs {
+		assertRefIntegrity(t, ref, sourcePath, "message", rawForSHA(srcData, ref.SHA256))
+	}
+}
+
+func expectedMessageRefs(t *testing.T, data map[string]json.RawMessage, sourcePath string) []domain.ContentRef {
+	t.Helper()
+	var refs []domain.ContentRef
+	if raw, ok := data["summary"]; ok {
+		refs = append(refs, expectedSummaryRefs(t, raw, sourcePath)...)
+	}
+	if raw, ok := data["error"]; ok {
+		refs = append(refs, expectedErrorRefs(t, raw, sourcePath)...)
+	}
+	return refs
+}
+
+func expectedSummaryRefs(t *testing.T, raw json.RawMessage, sourcePath string) []domain.ContentRef {
+	t.Helper()
+	kind := kindOf(raw)
+	switch kind {
+	case valNull, valBool, valNumber, valString:
+		return nil
+	case valArray:
+		if isEmptyArray(raw) {
+			return nil
+		}
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("summary object: %v", err)
+	}
+	diffsRaw, ok := obj["diffs"]
+	if !ok {
+		return nil
+	}
+	return expectedDiffsRefs(t, diffsRaw, sourcePath)
+}
+
+func expectedDiffsRefs(t *testing.T, raw json.RawMessage, sourcePath string) []domain.ContentRef {
+	t.Helper()
+	if kindOf(raw) == valArray {
+		var entries []json.RawMessage
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			t.Fatalf("diffs array: %v", err)
+		}
+		var refs []domain.ContentRef
+		for _, e := range entries {
+			if kindOf(e) != valObject {
+				continue
+			}
+			var em map[string]json.RawMessage
+			if err := json.Unmarshal(e, &em); err != nil {
+				t.Fatalf("diffs entry: %v", err)
+			}
+			patchRaw, ok := em["patch"]
+			if !ok || isEmptyText(patchRaw) {
+				continue
+			}
+			refs = append(refs, buildRef(sourcePath, "message", "row", patchRaw))
+		}
+		return refs
+	}
+	if isEmptyText(raw) {
+		return nil
+	}
+	return []domain.ContentRef{buildRef(sourcePath, "message", "row", raw)}
+}
+
+func expectedErrorRefs(t *testing.T, raw json.RawMessage, sourcePath string) []domain.ContentRef {
+	t.Helper()
+	kind := kindOf(raw)
+	switch kind {
+	case valNull, valBool, valNumber, valString:
+		return nil
+	case valArray:
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("error object: %v", err)
+	}
+	dataRaw, ok := obj["data"]
+	if !ok {
+		return nil
+	}
+	if kindOf(dataRaw) != valObject {
+		return nil
+	}
+	var dataObj map[string]json.RawMessage
+	if err := json.Unmarshal(dataRaw, &dataObj); err != nil {
+		t.Fatalf("error.data object: %v", err)
+	}
+	msgRaw, ok := dataObj["message"]
+	if !ok || isEmptyText(msgRaw) {
+		return nil
+	}
+	return []domain.ContentRef{buildRef(sourcePath, "message", "row", msgRaw)}
+}
+
+func isEmptyText(raw json.RawMessage) bool {
+	k := kindOf(raw)
+	switch k {
+	case valNull, valBool, valNumber:
+		return true
+	case valString:
+		return string(raw) == `""`
+	case valArray:
+		return isEmptyArray(raw)
+	default:
+		return false
+	}
+}
+
+func assertMessageContentStripped(t *testing.T, sourcePath string, src, out map[string]json.RawMessage) {
+	t.Helper()
+	if s, ok := src["summary"]; ok {
+		assertSummaryStripped(t, sourcePath, s, out["summary"])
+	}
+	if e, ok := src["error"]; ok {
+		assertErrorStripped(t, sourcePath, e, out["error"])
+	}
+	for k, v := range src {
+		switch k {
+		case "summary", "error":
+			continue
+		}
+		if !bytes.Equal(out[k], v) {
+			t.Errorf("non-content field %q altered", k)
+		}
+	}
+}
+
+func assertSummaryStripped(t *testing.T, sourcePath string, src, out json.RawMessage) {
+	t.Helper()
+	kind := kindOf(src)
+	switch kind {
+	case valNull, valBool, valNumber:
+		if !bytes.Equal(out, src) {
+			t.Errorf("text-incapable summary altered: %s -> %s", src, out)
+		}
+		return
+	case valString, valArray:
+		if isEmptyText(src) {
+			if !bytes.Equal(out, src) {
+				t.Errorf("empty summary altered: %s -> %s", src, out)
+			}
+		}
+		return
+	}
+	var srcObj map[string]json.RawMessage
+	if err := json.Unmarshal(src, &srcObj); err != nil {
+		t.Fatalf("summary object: %v", err)
+	}
+	var outObj map[string]json.RawMessage
+	if err := json.Unmarshal(out, &outObj); err != nil {
+		t.Fatalf("stripped summary object: %v", err)
+	}
+	assertDiffsStripped(t, sourcePath, srcObj["diffs"], outObj["diffs"])
+}
+
+func assertDiffsStripped(t *testing.T, sourcePath string, src, out json.RawMessage) {
+	t.Helper()
+	if kindOf(src) == valArray {
+		var srcEntries []json.RawMessage
+		if err := json.Unmarshal(src, &srcEntries); err != nil {
+			t.Fatalf("diffs array: %v", err)
+		}
+		var outEntries []json.RawMessage
+		if err := json.Unmarshal(out, &outEntries); err != nil {
+			t.Fatalf("stripped diffs array: %v", err)
+		}
+		if len(outEntries) != len(srcEntries) {
+			t.Fatalf("diffs entries count = %d, want %d", len(outEntries), len(srcEntries))
+		}
+		for i := range srcEntries {
+			assertDiffEntryStripped(t, sourcePath, srcEntries[i], outEntries[i])
+		}
+		return
+	}
+	if isEmptyText(src) {
+		if !bytes.Equal(out, src) {
+			t.Errorf("empty diffs altered")
+		}
+		return
+	}
+	assertRefAt(t, out, sourcePath, "message")
+}
+
+func assertDiffEntryStripped(t *testing.T, sourcePath string, src, out json.RawMessage) {
+	t.Helper()
+	if kindOf(src) != valObject {
+		return
+	}
+	var srcObj map[string]json.RawMessage
+	if err := json.Unmarshal(src, &srcObj); err != nil {
+		t.Fatalf("diff entry: %v", err)
+	}
+	var outObj map[string]json.RawMessage
+	if err := json.Unmarshal(out, &outObj); err != nil {
+		t.Fatalf("stripped diff entry: %v", err)
+	}
+	for k, v := range srcObj {
+		if k == "patch" {
+			if isEmptyText(v) {
+				if !bytes.Equal(outObj[k], v) {
+					t.Errorf("empty patch altered")
+				}
+			} else {
+				assertRefAt(t, outObj[k], sourcePath, "message")
+			}
+			continue
+		}
+		if !bytes.Equal(outObj[k], v) {
+			t.Errorf("diff entry field %q altered: %s -> %s", k, v, outObj[k])
+		}
+	}
+}
+
+func assertErrorStripped(t *testing.T, sourcePath string, src, out json.RawMessage) {
+	t.Helper()
+	kind := kindOf(src)
+	switch kind {
+	case valNull, valBool, valNumber, valString, valArray:
+		return
+	}
+	var srcObj map[string]json.RawMessage
+	if err := json.Unmarshal(src, &srcObj); err != nil {
+		t.Fatalf("error object: %v", err)
+	}
+	var outObj map[string]json.RawMessage
+	if err := json.Unmarshal(out, &outObj); err != nil {
+		t.Fatalf("stripped error object: %v", err)
+	}
+	if nameRaw, ok := srcObj["name"]; ok {
+		if !bytes.Equal(outObj["name"], nameRaw) {
+			t.Errorf("error.name altered: %s -> %s", nameRaw, outObj["name"])
+		}
+	}
+	if dataRaw, ok := srcObj["data"]; ok {
+		assertErrorDataStripped(t, sourcePath, dataRaw, outObj["data"])
+	}
+}
+
+func assertErrorDataStripped(t *testing.T, sourcePath string, src, out json.RawMessage) {
+	t.Helper()
+	if kindOf(src) != valObject {
+		return
+	}
+	var srcObj map[string]json.RawMessage
+	if err := json.Unmarshal(src, &srcObj); err != nil {
+		t.Fatalf("error.data object: %v", err)
+	}
+	var outObj map[string]json.RawMessage
+	if err := json.Unmarshal(out, &outObj); err != nil {
+		t.Fatalf("stripped error.data object: %v", err)
+	}
+	msgRaw, ok := srcObj["message"]
+	if !ok {
+		return
+	}
+	if isEmptyText(msgRaw) {
+		if !bytes.Equal(outObj["message"], msgRaw) {
+			t.Errorf("empty error.data.message altered")
+		}
+		return
+	}
+	assertRefAt(t, outObj["message"], sourcePath, "message")
+}
+
+func rawForSHA(data map[string]json.RawMessage, sha string) json.RawMessage {
+	var found json.RawMessage
+	var walk func(v json.RawMessage)
+	walk = func(v json.RawMessage) {
+		if found != nil {
+			return
+		}
+		if recomputeSHA(v) == sha {
+			found = v
+			return
+		}
+		switch kindOf(v) {
+		case valObject:
+			var m map[string]json.RawMessage
+			if json.Unmarshal(v, &m) == nil {
+				for _, child := range m {
+					walk(child)
+				}
+			}
+		case valArray:
+			var arr []json.RawMessage
+			if json.Unmarshal(v, &arr) == nil {
+				for _, child := range arr {
+					walk(child)
+				}
+			}
+		}
+	}
+	for _, v := range data {
+		walk(v)
+	}
+	return found
 }
 
 func verifyPartStrip(t *testing.T, mode config.PrivacyMode, sourcePath string, payload, stripped []byte, refs []domain.ContentRef) {
@@ -649,4 +1013,204 @@ func sessionEnvelopeRaw(id, title, summaryDiffs string) []byte {
 		panic(err)
 	}
 	return b
+}
+
+func messageEnvelopeRaw(id, data string) []byte {
+	env := map[string]any{
+		"id":           id,
+		"session_id":   "ses",
+		"time_created": 0,
+		"time_updated": 0,
+		"data":         json.RawMessage(data),
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func TestStripMessageFailClosedUnknownDiffEntryKey(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"user","summary":{"diffs":[{"file":"a","patch":"x","extra":"leak"}]}}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: unknown diff-entry key should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageFailClosedUnknownSummaryKey(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"user","summary":{"diffs":[],"extra":"leak"}}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: unknown summary key should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageFailClosedUnknownErrorKey(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"assistant","error":{"name":"E","data":{"message":"x"},"extra":"leak"}}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: unknown error key should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageFailClosedUnknownErrorDataKey(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"assistant","error":{"name":"E","data":{"message":"x","extra":"leak"}}}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: unknown error.data key should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageFailClosedSummaryStringForm(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"user","summary":"some diff text"}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: summary as string should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageFailClosedErrorStringForm(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"assistant","error":"oops"}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: error as string should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageFailClosedErrorDataStringForm(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"assistant","error":{"name":"E","data":"oops"}}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		if _, _, err := StripContent(mode, "/s", "message", payload); err == nil {
+			t.Errorf("%s: error.data as string should fail closed", mode)
+		}
+	}
+}
+
+func TestStripMessageSummaryTruePasses(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"assistant","summary":true}`)
+	for _, mode := range []config.PrivacyMode{config.PrivacyMetadataOnly, config.PrivacyContentLocal} {
+		stripped, refs, err := StripContent(mode, "/s", "message", payload)
+		if err != nil {
+			t.Fatalf("%s: summary:true should pass: %v", mode, err)
+		}
+		if len(refs) != 0 {
+			t.Errorf("%s: summary:true produced %d refs, want 0", mode, len(refs))
+		}
+		if !bytes.Equal(stripped, payload) {
+			t.Errorf("%s: summary:true should be byte-untouched", mode)
+		}
+	}
+}
+
+func TestStripMessageErrorStripsMessageKeepsName(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"assistant","error":{"name":"MessageAbortedError","data":{"message":"Aborted"}}}`)
+	stripped, refs, err := StripContent(config.PrivacyMetadataOnly, "/s", "message", payload)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("refs = %d, want 1", len(refs))
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(stripped, &env); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var data struct {
+		Error struct {
+			Name json.RawMessage `json:"name"`
+			Data struct {
+				Message json.RawMessage `json:"message"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("parse data: %v", err)
+	}
+	if string(data.Error.Name) != `"MessageAbortedError"` {
+		t.Errorf("error.name altered: %s", data.Error.Name)
+	}
+	assertRefAt(t, data.Error.Data.Message, "/s", "message")
+	assertRefIntegrity(t, refs[0], "/s", "message", json.RawMessage(`"Aborted"`))
+}
+
+func TestStripMessageStringDiffsWholeValueRef(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"user","summary":{"diffs":"Index: a\n---\n+++ secret\n"}}`)
+	stripped, refs, err := StripContent(config.PrivacyMetadataOnly, "/s", "message", payload)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("refs = %d, want 1", len(refs))
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(stripped, &env); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var data struct {
+		Summary struct {
+			Diffs json.RawMessage `json:"diffs"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("parse data: %v", err)
+	}
+	assertRefAt(t, data.Summary.Diffs, "/s", "message")
+	assertRefIntegrity(t, refs[0], "/s", "message", json.RawMessage(`"Index: a\n---\n+++ secret\n"`))
+}
+
+func TestStripMessageDiffEntryPatchWrapped(t *testing.T) {
+	payload := messageEnvelopeRaw("msg_1", `{"role":"user","summary":{"diffs":[{"file":"a.go","patch":"@@ -1 +1 @@\n-old\n+new\n","additions":1,"deletions":1,"status":"modified"}]}}`)
+	stripped, refs, err := StripContent(config.PrivacyMetadataOnly, "/s", "message", payload)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("refs = %d, want 1", len(refs))
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(stripped, &env); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var data struct {
+		Summary struct {
+			Diffs []struct {
+				File      json.RawMessage `json:"file"`
+				Patch     json.RawMessage `json:"patch"`
+				Additions json.RawMessage `json:"additions"`
+				Deletions json.RawMessage `json:"deletions"`
+				Status    json.RawMessage `json:"status"`
+			} `json:"diffs"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("parse data: %v", err)
+	}
+	entry := data.Summary.Diffs[0]
+	if string(entry.File) != `"a.go"` {
+		t.Errorf("file altered: %s", entry.File)
+	}
+	if string(entry.Additions) != `1` {
+		t.Errorf("additions altered: %s", entry.Additions)
+	}
+	if string(entry.Deletions) != `1` {
+		t.Errorf("deletions altered: %s", entry.Deletions)
+	}
+	if string(entry.Status) != `"modified"` {
+		t.Errorf("status altered: %s", entry.Status)
+	}
+	assertRefAt(t, entry.Patch, "/s", "message")
+	assertRefIntegrity(t, refs[0], "/s", "message", json.RawMessage(`"@@ -1 +1 @@\n-old\n+new\n"`))
 }

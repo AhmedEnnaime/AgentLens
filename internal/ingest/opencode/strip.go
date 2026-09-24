@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -27,7 +28,7 @@ func StripContent(mode config.PrivacyMode, sourcePath, recordType string, payloa
 	case "session":
 		return stripSession(mode, sourcePath, payload)
 	case "message":
-		return payload, nil, nil
+		return stripMessage(mode, sourcePath, payload)
 	default:
 		return nil, nil, fmt.Errorf("opencode: unknown record type %q", recordType)
 	}
@@ -176,6 +177,330 @@ func stripSession(mode config.PrivacyMode, sourcePath string, payload []byte) ([
 		return nil, nil, err
 	}
 	return out, []domain.ContentRef{ref}, nil
+}
+
+func stripMessage(mode config.PrivacyMode, sourcePath string, payload []byte) ([]byte, []domain.ContentRef, error) {
+	env, err := parseObject(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opencode: message: %w", err)
+	}
+	rowID, err := fieldString(env, "id")
+	if err != nil {
+		return nil, nil, fmt.Errorf("opencode: message: %w", err)
+	}
+	dataRaw, ok := env["data"]
+	if !ok {
+		return nil, nil, fmt.Errorf("opencode: message: missing data")
+	}
+	data, err := parseObject(dataRaw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opencode: message: %w", err)
+	}
+	refs, err := stripMessageData(data, sourcePath, rowID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(refs) == 0 {
+		return payload, nil, nil
+	}
+	if mode == config.PrivacyContentLocal {
+		return payload, refs, nil
+	}
+	return rebuildEnvelope(env, data, refs)
+}
+
+var (
+	summaryKeys   = keySet("diffs")
+	diffEntryKeys = keySet("file", "patch", "additions", "deletions", "status")
+	errorKeys     = keySet("name", "data")
+	errorDataKeys = keySet("message")
+)
+
+func keySet(keys ...string) map[string]bool {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	return m
+}
+
+func stripMessageData(data map[string]json.RawMessage, sourcePath, rowID string) ([]domain.ContentRef, error) {
+	var refs []domain.ContentRef
+	if raw, ok := data["summary"]; ok {
+		out, r, err := stripSummary(raw, sourcePath, rowID)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: message: summary: %w", err)
+		}
+		refs = append(refs, r...)
+		if out != nil {
+			data["summary"] = out
+		}
+	}
+	if raw, ok := data["error"]; ok {
+		out, r, err := stripError(raw, sourcePath, rowID)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: message: error: %w", err)
+		}
+		refs = append(refs, r...)
+		if out != nil {
+			data["error"] = out
+		}
+	}
+	return refs, nil
+}
+
+func stripSummary(raw json.RawMessage, sourcePath, rowID string) (json.RawMessage, []domain.ContentRef, error) {
+	switch kindOf(raw) {
+	case valNull, valBool, valNumber:
+		return nil, nil, nil
+	case valString:
+		if isEmptyString(raw) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("string form is unclassifiable")
+	case valArray:
+		if isEmptyArray(raw) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("array form is unclassifiable")
+	}
+	obj, err := parseObject(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireKeys(obj, "summary", summaryKeys); err != nil {
+		return nil, nil, err
+	}
+	diffsRaw, ok := obj["diffs"]
+	if !ok {
+		return nil, nil, nil
+	}
+	out, refs, err := stripDiffs(diffsRaw, sourcePath, rowID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	obj["diffs"] = out
+	reb, err := marshalObject(obj)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reb, refs, nil
+}
+
+func stripDiffs(raw json.RawMessage, sourcePath, rowID string) (json.RawMessage, []domain.ContentRef, error) {
+	if kindOf(raw) == valArray {
+		var entries []json.RawMessage
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return nil, nil, err
+		}
+		if len(entries) == 0 {
+			return nil, nil, nil
+		}
+		var refs []domain.ContentRef
+		for i, e := range entries {
+			out, r, err := stripDiffEntry(e, sourcePath, rowID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if out != nil {
+				entries[i] = out
+			}
+			refs = append(refs, r...)
+		}
+		if len(refs) == 0 {
+			return nil, nil, nil
+		}
+		arrBytes, err := json.Marshal(entries)
+		if err != nil {
+			return nil, nil, err
+		}
+		return arrBytes, refs, nil
+	}
+	return stripPureText(raw, sourcePath, rowID)
+}
+
+func stripDiffEntry(raw json.RawMessage, sourcePath, rowID string) (json.RawMessage, []domain.ContentRef, error) {
+	if kindOf(raw) != valObject {
+		return stripPureText(raw, sourcePath, rowID)
+	}
+	obj, err := parseObject(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireKeys(obj, "diff entry", diffEntryKeys); err != nil {
+		return nil, nil, err
+	}
+	patchRaw, ok := obj["patch"]
+	if !ok {
+		return nil, nil, nil
+	}
+	out, refs, err := stripPureText(patchRaw, sourcePath, rowID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	obj["patch"] = out
+	reb, err := marshalObject(obj)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reb, refs, nil
+}
+
+func stripError(raw json.RawMessage, sourcePath, rowID string) (json.RawMessage, []domain.ContentRef, error) {
+	switch kindOf(raw) {
+	case valNull, valBool, valNumber:
+		return nil, nil, nil
+	case valString:
+		if isEmptyString(raw) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("string form is unclassifiable")
+	case valArray:
+		if isEmptyArray(raw) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("array form is unclassifiable")
+	}
+	obj, err := parseObject(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireKeys(obj, "error", errorKeys); err != nil {
+		return nil, nil, err
+	}
+	dataRaw, ok := obj["data"]
+	if !ok {
+		return nil, nil, nil
+	}
+	out, refs, err := stripErrorData(dataRaw, sourcePath, rowID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	obj["data"] = out
+	reb, err := marshalObject(obj)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reb, refs, nil
+}
+
+func stripErrorData(raw json.RawMessage, sourcePath, rowID string) (json.RawMessage, []domain.ContentRef, error) {
+	switch kindOf(raw) {
+	case valNull, valBool, valNumber:
+		return nil, nil, nil
+	case valString:
+		if isEmptyString(raw) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("string form is unclassifiable")
+	case valArray:
+		if isEmptyArray(raw) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("array form is unclassifiable")
+	}
+	obj, err := parseObject(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireKeys(obj, "error.data", errorDataKeys); err != nil {
+		return nil, nil, err
+	}
+	msgRaw, ok := obj["message"]
+	if !ok {
+		return nil, nil, nil
+	}
+	out, refs, err := stripPureText(msgRaw, sourcePath, rowID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	obj["message"] = out
+	reb, err := marshalObject(obj)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reb, refs, nil
+}
+
+func stripPureText(raw json.RawMessage, sourcePath, rowID string) (json.RawMessage, []domain.ContentRef, error) {
+	switch kindOf(raw) {
+	case valNull, valBool, valNumber:
+		return nil, nil, nil
+	case valString:
+		if isEmptyString(raw) {
+			return nil, nil, nil
+		}
+	case valArray:
+		if isEmptyArray(raw) {
+			return nil, nil, nil
+		}
+	case valObject:
+	default:
+		return nil, nil, fmt.Errorf("unhandled value kind")
+	}
+	ref := buildRef(sourcePath, "message", rowID, raw)
+	return refWrapper(ref), []domain.ContentRef{ref}, nil
+}
+
+type jsonValueKind int
+
+const (
+	valNull jsonValueKind = iota
+	valBool
+	valNumber
+	valString
+	valArray
+	valObject
+)
+
+func kindOf(raw json.RawMessage) jsonValueKind {
+	b := bytes.TrimSpace([]byte(raw))
+	if len(b) == 0 {
+		return valNull
+	}
+	switch b[0] {
+	case '{':
+		return valObject
+	case '[':
+		return valArray
+	case '"':
+		return valString
+	case 't', 'f':
+		return valBool
+	case 'n':
+		return valNull
+	default:
+		return valNumber
+	}
+}
+
+func requireKeys(obj map[string]json.RawMessage, location string, allowed map[string]bool) error {
+	for k := range obj {
+		if !allowed[k] {
+			return fmt.Errorf("%s: unknown key %q", location, k)
+		}
+	}
+	return nil
+}
+
+func isEmptyString(raw json.RawMessage) bool {
+	return string(raw) == `""`
+}
+
+func isEmptyArray(raw json.RawMessage) bool {
+	return string(raw) == "[]"
 }
 
 func rebuildEnvelope(env, data map[string]json.RawMessage, refs []domain.ContentRef) ([]byte, []domain.ContentRef, error) {

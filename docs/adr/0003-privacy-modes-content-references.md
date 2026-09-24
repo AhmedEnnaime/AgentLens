@@ -124,3 +124,96 @@ Raw events are immutable (ADR-2 D8). Re-importing the same trace under a differe
 - **No retroactive strip** (D10): a store that ever imported content-local keeps those bytes until a future purge issue. Pre-release DBs are disposable.
 - **Re-read degradation is a contract** (D8/D9): `Unavailable` and `Changed` are typed statuses the CLI renders honestly, never an error that breaks a report.
 - **Fail-closed on format drift** (D4/D5): an unknown OpenCode part type or record type under metadata-only aborts the import — privacy over availability, with the known cost that a future OpenCode version may temporarily break import until the map is updated.
+
+## Amendment A (2026-09-15): message-record content locations (D5 correction) + composite RowID (D1 clarification)
+
+**Finding (fixture evidence, all five fixtures).** D5's session row lists `summary_diffs`
+as stripped content — correct per the dossier's session table — but the column is NULL in
+every captured fixture session. The populated location is `message.data.summary.diffs`
+(user messages): arrays of `{file, patch, additions, deletions, status}` entries (subset
+per entry) — 14 messages / 57 entries in multi-turn-build, 28 messages / 43 entries in
+subagent-tree. Under the pre-amendment map the `message` record type passed through
+untouched, so those patches — full file-edit text, the exact content class this ADR
+exists to exclude — entered metadata-only stores. A leak; closed here. Three observed
+shapes force precision: (a) 19 messages carry `diffs` as a plain *string* (fixture
+anonymization collapses oversized arrays to `[TRUNCATED-FIXTURE-ONLY]`; string is also
+OpenCode's own at-rest form — the session-level `summary_diffs` column is TEXT);
+(b) 6 compaction-agent messages carry `"summary": true` — a flag, not a container;
+(c) an undocumented content-bearing field exists: `message.data.error` —
+`{"name":"MessageAbortedError","data":{"message":"Aborted"}}`, 3 rows in subagent-tree —
+the message-level sibling of the already-stripped `part.data.state.error`.
+
+**Decision — D5 amendment.** The message row joins the content-field map:
+
+| Record | Content fields stripped | Kept as metadata |
+|---|---|---|
+| `message` | `data.summary.diffs[].patch` (ref per entry); `data.summary.diffs` whole-value when not an array (text form); `data.error.data.message` | `diffs[].file/additions/deletions/status`, `error.name`, and everything else: `role`, `time`, `agent`, `mode`, `model{…}`, `modelID`, `providerID`, `variant`, `parentID`, `path`, `cost`, `tokens`, `finish` |
+
+The split follows D5's established field-level granularity: patch parts keep `files[]`,
+tool parts strip `state.input/output/error` and keep `state.title`. The patch text is
+content; `file` is a path, and D5 keeps paths everywhere; `additions`/`deletions`/
+`status` are the per-file twins of the session rollups D5 keeps
+(`summary_additions/deletions/files`). Keeping them preserves per-turn file metrics in
+metadata-only — that mode's entire point.
+
+**Location vocabulary (fail-closed, both modes — the part-type precedent):** diff-entry
+keys ⊆ {file, patch, additions, deletions, status}; `summary` object keys = {diffs};
+`error` keys = {name, data}; `error.data` keys = {message}. Any unknown key aborts the
+import: diff entries and the error object are typeless records — their keyset *is*
+their type, and an unknown key could name a new content location that silent
+pass-through would leak.
+
+**Value-shape rules under known locations:** a non-empty text-capable value under a
+*pure-content* location (`diffs`, a diffs entry, `patch`) that is not the observed
+shape → whole-value ref (strip; privacy > availability). `summary`, `error`,
+`error.data` are *mixed containers* (metadata and content inside): a text-capable
+non-object value there is unclassifiable → fail-closed. Text-incapable scalars (null,
+bool, number — e.g. `"summary": true`) pass: they provably hold no text. Empty values
+(`""`, `[]`, absent key) pass. Rows with nothing stripped return original bytes
+untouched and zero refs.
+
+**D1 clarification — composite native primary keys.** `RowID` is the source row's
+native primary key as the source schema defines it. Single-column PKs
+(session/message/part `id`) pass through verbatim. Composite PKs encode as their
+columns joined by `":"` in schema order — `todo` is (`session_id`, `position`), so
+`RowID = "<session_id>:<position>"`. Consumers parse from the right (the final
+`:`-suffix is the integer position; everything before is the session id) — unambiguous
+even if a session id ever contained `:`. SQLite's implicit `rowid` is rejected as a
+RowID source: storage-internal, not agent-native identity, unstable across
+VACUUM/restore — a re-read could fetch the wrong row. The shipped todo encoding
+conforms; no reissue needed.
+
+**Consequences.**
+- The session `summary_diffs` map row stands (the dossier observed the column as diff
+  text) but no current fixture exercises it; its only live proof is the synthetic
+  test. Honest evidence note, not a map change.
+- Several refs now share one (`Table`, `RowID`) — up to N patch refs per message, up
+  to 3 state refs per tool part (pre-existing). `SHA256` is the disambiguator: #8's
+  resolver locates a value inside a row by hash-match over the row's content
+  locations, never by position.
+- The D5 hash rule applies per stripped value: raw `json.RawMessage` bytes of each
+  `patch` / string-`diffs` / `error.data.message` — never re-marshaled.
+- Dossier addendum required in this fix round: §3.1 gains the diffs entry shape,
+  populated-on-user-messages, `summary: true`, `variant`; §3.2 gains `error`.
+- The fixture script collapses oversized `diffs` arrays to a string — the fixtures
+  legitimately exercise the whole-value branch (19 rows: 4 multi-turn-build,
+  14 subagent-tree, 1 tool-heavy).
+
+**Test obligations (fix round).**
+- Fixture-driven metadata-only proof over every message row of every fixture:
+  per-entry `patch` ref-wrapped with independently recomputed SHA256/Bytes (test
+  recomputes from source raw bytes), `file/additions/deletions/status` preserved;
+  string-`diffs` rows whole-value refs; `error.data.message` refs with `error.name`
+  preserved; `summary:true` and `{"diffs":[]}` rows byte-untouched, zero refs.
+- Pinned drift-alarm constants (ruling-time): message-record refs per fixture —
+  multi-turn-build 61 (57 patch + 4 string), subagent-tree 60 (43 + 14 + 3 error),
+  tool-heavy 1, single-turn 0, cache-heavy 0. A tripped constant is a deliberate
+  review, never a silent pass.
+- Content-local: byte-identical payloads; refs equal to metadata-only's per row.
+- Fail-closed synthetics for every new vocabulary violation (unknown entry key,
+  unknown `summary`/`error`/`error.data` key, `summary`/`error`/`error.data` as
+  string), in both modes.
+- The subtask-5 leak scan samples content bytes from *every* content location —
+  per-entry patch text, string-`diffs` bytes, `error.data.message` — matched as exact
+  raw JSON bytes, not naive substrings (`"Aborted"` collides with the surviving
+  `MessageAbortedError`; exact-byte sampling is load-bearing).

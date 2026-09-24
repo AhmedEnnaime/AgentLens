@@ -83,10 +83,41 @@ Relevant tables (`.tables`):
   "role": "user",
   "time": { "created": 1789080895833 },
   "agent": "build",
-  "model": { "providerID": "ollama", "modelID": "glm-5.3:cloud" },
+  "model": { "providerID": "ollama", "modelID": "glm-5.3:cloud", "variant": "max" },
   "summary": { "diffs": [] }
 }
 ```
+
+`summary.diffs` is populated on user messages only: an array of per-file diff
+entries, each an object with keys ⊆ `{file, patch, additions, deletions, status}`
+(subset per entry):
+
+```json
+{
+  "summary": {
+    "diffs": [
+      {
+        "file": "/abs/path/file.go",
+        "patch": "Index: file.go\n===================================================================\n--- a/file.go\n+++ b/file.go\n@@ ...\n-old\n+new\n",
+        "additions": 1,
+        "deletions": 1,
+        "status": "modified"
+      }
+    ]
+  }
+}
+```
+
+`file` is the edited path; `patch` is the full file-edit diff text (content — D28);
+`additions`/`deletions` are per-file line counts; `status` is `modified`/`added`/
+`deleted`. `patch` may be empty (binary/no-op edits). The fixture anonymizer
+collapses oversized `diffs` arrays to a single string
+`[TRUNCATED-FIXTURE-ONLY]` — string form is also OpenCode's own at-rest shape
+(the session-level `summary_diffs` column is TEXT). Compaction-agent messages may
+carry `"summary": true` (a flag, not a container).
+
+`variant` appears in the nested `model` object (`"variant": "max"`) on user
+messages, mirroring the session-level agent blob.
 
 ### 3.2 Assistant message
 
@@ -111,6 +142,21 @@ Relevant tables (`.tables`):
   "finish": "tool-calls"
 }
 ```
+
+A small subset of assistant messages carry an aborted-call error object:
+
+```json
+{
+  "error": {
+    "name": "MessageAbortedError",
+    "data": { "message": "Aborted" }
+  }
+}
+```
+
+`error.name` is the error class; `error.data.message` is the error text (content —
+D28). This is the message-level sibling of the per-part `part.data.state.error`
+already covered in §4.1.
 
 Field-by-field:
 
